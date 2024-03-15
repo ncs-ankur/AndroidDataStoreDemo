@@ -2,9 +2,11 @@ package com.ncs.poc.androiddatastoredemo
 
 import android.content.ContentValues
 import android.content.SharedPreferences
-import android.graphics.Color
+import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup.LayoutParams.MATCH_PARENT
 import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
@@ -14,7 +16,6 @@ import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.room.Room
-import androidx.room.Room.databaseBuilder
 import com.google.android.material.divider.MaterialDivider
 import com.ncs.poc.androiddatastoredemo.provider.MyDataProvider
 import com.ncs.poc.androiddatastoredemo.room.AppDatabase
@@ -31,6 +32,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.InputStreamReader
+import java.io.OutputStream
 
 
 class MainActivity : AppCompatActivity() {
@@ -105,7 +107,7 @@ class MainActivity : AppCompatActivity() {
                 text = it,
                 styleRes = androidx.appcompat.R.style.Base_TextAppearance_AppCompat_SearchResult_Subtitle
             )
-            if(data.isBlank()) {
+            if (data.isBlank()) {
                 textView.text = "N/A"
                 textView.setTextColor(getColor(com.google.android.material.R.color.design_error))
             } else {
@@ -155,7 +157,7 @@ class MainActivity : AppCompatActivity() {
         saveDataInternalCacheDirectory(data)
         saveDataExternalFilesDirectory(data)
         saveDataExternalCacheDirectory(data)
-        saveDataExternalStoragePublicDirectory(data)
+        saveDataExternalStoragePublicDirectoryWithScopeProvider(data)
         saveDataRoom(data)
         saveDataContentProvider(data)
     }
@@ -186,12 +188,46 @@ class MainActivity : AppCompatActivity() {
         writeFileData(file, data)
     }
 
-    private fun saveDataExternalStoragePublicDirectory(data: String) {
-        val file = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            DATA_FILE_NAME
-        )
-        writeFileData(file, data)
+    var recentlyDownloadFile: Uri? = null
+
+    private fun saveDataExternalStoragePublicDirectoryWithScopeProvider(data: String) {
+        val resolver = contentResolver
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, DATA_FILE_NAME)
+            put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        }
+
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues)
+        uri?.let {
+            var outputStream: OutputStream? = null
+            try {
+                outputStream = resolver.openOutputStream(it)
+                outputStream?.write(data.toByteArray())
+                Log.d(
+                    "WRITEFILE",
+                    "Write file in external storage downloads public directory using scoped storage provider success"
+                )
+                recentlyDownloadFile = uri
+            } catch (e: IOException) {
+                Log.e(
+                    "WRITEFILE",
+                    "Unable to write file in external storage downloads public directory using scoped storage provider"
+                )
+                e.printStackTrace()
+            } finally {
+                try {
+                    outputStream?.close()
+                } catch (e: IOException) {
+                    e.printStackTrace()
+                }
+            }
+        } ?: run {
+            Log.e(
+                "WRITEFILE",
+                "Unable to write file in external storage downloads public directory using scoped storage provider"
+            )
+        }
     }
 
     private fun saveDataSQLite(data: String) {
@@ -227,7 +263,7 @@ class MainActivity : AppCompatActivity() {
         readDataFromInternalCacheDirectory()
         readDataFromExternalFilesDirectory()
         readDataFromExternalCacheDirectory()
-        readDataExternalStoragePublicDirectory()
+        readDataExternalStoragePublicDirectoryScopedProvider()
         readDataRoom()
         readDataContentProvider()
     }
@@ -281,16 +317,47 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
-    private fun readDataExternalStoragePublicDirectory() {
-        val file = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-            DATA_FILE_NAME
-        )
+    private fun readDataExternalStoragePublicDirectoryScopedProvider() {
+        var data = ""
+        var filePath: String? = ""
+        val resolver = contentResolver
+
+        recentlyDownloadFile?.let {
+            filePath = it.path
+            resolver.openInputStream(it)?.use { inputStream ->
+                data = inputStream.bufferedReader().use { it.readText() }
+            }
+        } ?: {
+            val projection =
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns._ID)
+            val selection = "${MediaStore.MediaColumns.DISPLAY_NAME}=?"
+            val selectionArgs = arrayOf(DATA_FILE_NAME)
+            val contentUri = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+
+            val cursor = resolver.query(contentUri, projection, selection, selectionArgs, null)
+            cursor?.use {
+                val idColumn = it.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                if (it.moveToFirst()) {
+                    val id = it.getLong(idColumn)
+                    val fileUri = android.net.Uri.withAppendedPath(contentUri, id.toString())
+                    filePath = fileUri.path
+                    resolver.openInputStream(fileUri)?.use { inputStream ->
+                        data = inputStream.bufferedReader().use { it.readText() }
+                    }
+                } else {
+                    Log.e(
+                        "READFILE",
+                        "File not found in external storage downloads public directory"
+                    )
+                }
+            }
+        }
+
         renderReadData(
-            title = "External storage downloads (public) directory",
-            command = "Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)",
-            data = readFileData(file),
-            path = file.path
+            title = "External storage downloads (public) directory using scoped storage provider",
+            command = "val cursor = resolver.query(MediaStore.Downloads.EXTERNAL_CONTENT_URI, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns._ID), MediaStore.MediaColumns.DISPLAY_NAME, DATA_FILE_NAME, null)",
+            data = data,
+            path = filePath
         )
     }
 
